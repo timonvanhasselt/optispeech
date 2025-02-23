@@ -28,7 +28,7 @@ print(f"Length of phoneme ids: {len(phids)}")
 
 # Config pipeline
 with initialize(version_base=None, config_path="../configs"):
-    dataset_cfg = compose(config_name="data/emily.yaml")
+    dataset_cfg = compose(config_name="data/kareem.yaml")
     cfg = compose(config_name="model/light.yaml")
     cfg.model.data_args = dict(
         name=dataset_cfg.data.name,
@@ -54,7 +54,7 @@ print(f"Batch['wav'] shape: {batch['wav'].shape}")
 print(f"Batch['pitches'] shape: {batch['pitches'].shape}")
 
 # Model
-device = "cpu"
+device = "cuda"
 model = hydra.utils.instantiate(cfg.model)
 model = model.eval()
 model = model.to(device)

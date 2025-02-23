@@ -34,7 +34,10 @@ def process_row(row, feature_extractor, text_processor, wav_path, data_dir, sids
     else:
         log.error(f"Invalid number of data items in dataset row: {len(row)}")
         exit(1)
-    audio_path = wav_path.joinpath(filestem + ".wav")
+    if Path(filestem).suffix in {".wav", ".mp3", ".flac"}:
+        audio_path = wav_path.joinpath(filestem)
+    else:
+        audio_path = wav_path.joinpath(filestem + ".wav")
     audio_path = audio_path.resolve()
     sid = sids.index(speaker.strip().lower()) if speaker else None
     lid = lids.index(lang.strip().lower()) if lang else None

@@ -132,7 +132,6 @@ class BaseLightningModule(LightningModule, ABC):
         log_outputs.update(
             {
                 "total_loss/train_am_loss": gen_am_loss.item(),
-                "gen_subloss/train_alighn_loss": gen_outputs["align_loss"].item(),
                 "gen_subloss/train_duration_loss": gen_outputs["duration_loss"].item(),
                 "gen_subloss/train_pitch_loss": gen_outputs["pitch_loss"].item(),
                 "gen_subloss/train_energy_loss": gen_outputs["energy_loss"].item(),
@@ -199,7 +198,6 @@ class BaseLightningModule(LightningModule, ABC):
         log_outputs.update(
             {
                 "total_loss/val_am_loss": gen_outputs["loss"].item(),
-                "gen_subloss/val_alighn_loss": gen_outputs["align_loss"].item(),
                 "gen_subloss/val_duration_loss": gen_outputs["duration_loss"].item(),
                 "gen_subloss/val_pitch_loss": gen_outputs["pitch_loss"].item(),
                 "gen_subloss/val_energy_loss": gen_outputs["energy_loss"].item()

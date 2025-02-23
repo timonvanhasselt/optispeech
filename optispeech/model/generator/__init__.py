@@ -1,3 +1,4 @@
+import math
 from time import perf_counter
 
 import torch
@@ -8,7 +9,8 @@ from optispeech.utils import denormalize, sequence_mask
 from optispeech.utils.segments import get_segments, get_random_segments
 
 from .modules.alignments import average_by_duration, maximum_path
-from .loss import duration_loss, FastSpeech2Loss, ForwardSumLoss
+from .loss import FastSpeech2Loss, duration_loss as f_duration_loss
+
 
 
 class OptiSpeechGenerator(nn.Module):
@@ -59,7 +61,6 @@ class OptiSpeechGenerator(nn.Module):
         if self.num_languages > 1:
             self.lid_embed = torch.nn.Embedding(self.num_languages, dim)
         self.loss_criterion = FastSpeech2Loss()
-        self.forwardsum_loss = ForwardSumLoss()
 
     def forward(self, x, x_lengths, mel, mel_lengths, pitches, energies, sids, lids):
         """
@@ -112,18 +113,15 @@ class OptiSpeechGenerator(nn.Module):
         attn_mask = x_mask.unsqueeze(-1) * mel_mask.unsqueeze(2)
         with torch.no_grad():
             # negative cross-entropy
-            s_p_sq_r = torch.ones_like(x) # [b, d, t]
-            # s_p_sq_r = torch.exp(-2 * logx) 
+            mu_x = x.clone().transpose(1, 2)
+            s_p_sq_r = torch.ones_like(mu_x) # [b, d, t]
             neg_cent1 = torch.sum(
-                -0.5 * math.log(2 * math.pi)- torch.zeros_like(x), [1], keepdim=True
+                -0.5 * math.log(2 * math.pi)- torch.zeros_like(mu_x), [1], keepdim=True
             )
-            # neg_cent1 = torch.sum(
-            #     -0.5 * math.log(2 * math.pi) - logx, [1], keepdim=True
-            #     ) # [b, 1, t_s]
-            neg_cent2 = torch.einsum("bdt, bds -> bts", -0.5 * (y**2), s_p_sq_r)
-            neg_cent3 = torch.einsum("bdt, bds -> bts", y, (x * s_p_sq_r))
+            neg_cent2 = torch.einsum("bdt, bds -> bts", -0.5 * (mel**2), s_p_sq_r)
+            neg_cent3 = torch.einsum("bdt, bds -> bts", mel, (mu_x * s_p_sq_r))
             neg_cent4 = torch.sum(
-                -0.5 * (x**2) * s_p_sq_r, [1], keepdim=True
+                -0.5 * (mu_x**2) * s_p_sq_r, [1], keepdim=True
             )  
             neg_cent = neg_cent1 + neg_cent2 + neg_cent3 + neg_cent4
             attn_mask = torch.unsqueeze(x_mask, 2) * torch.unsqueeze(mel_mask, -1)
@@ -131,7 +129,8 @@ class OptiSpeechGenerator(nn.Module):
                 maximum_path(neg_cent, attn_mask.squeeze(1)).unsqueeze(1).detach()
             )
         durations = torch.log(1e-8 + attn.sum(2)) * x_mask
-        dur_loss = duration_loss(duration_hat, durations, x_lengths, use_log=False)
+        duration_loss = f_duration_loss(duration_hat, durations, x_lengths, use_log=False)
+        durations = durations.squeeze(1).detach()
 
         # Average pitch and energy values based on durations
         pitches = average_by_duration(durations, pitches.unsqueeze(-1), x_lengths, mel_lengths)
@@ -143,8 +142,8 @@ class OptiSpeechGenerator(nn.Module):
 
         # upsample to mel lengths
         attn = attn.squeeze(1).transpose(1,2)
-        y = torch.matmul(attn.squeeze(1).transpose(1, 2), x.transpose(1, 2))
-        y = y.transpose(1, 2)
+        y = torch.matmul(attn.squeeze(1).transpose(1, 2), mu_x.transpose(1, 2))
+        # y = y.transpose(1, 2)
 
         # Decoder
         y = self.decoder(y, target_padding_mask)
@@ -168,20 +167,15 @@ class OptiSpeechGenerator(nn.Module):
 
         # Losses
         loss_coeffs = self.loss_coeffs
-        duration_loss, pitch_loss, energy_loss = self.loss_criterion(
-            d_outs=duration_hat.unsqueeze(-1),
+        pitch_loss, energy_loss = self.loss_criterion(
             p_outs=pitch_hat.unsqueeze(-1),
             e_outs=energy_hat.unsqueeze(-1),
-            ds=durations.unsqueeze(-1),
             ps=pitches.unsqueeze(-1),
             es=energies.unsqueeze(-1),
             ilens=x_lengths,
         )
-        forwardsum_loss = self.forwardsum_loss(log_p_attn, x_lengths, mel_lengths)
-        align_loss = forwardsum_loss + bin_loss
         loss = (
-            (align_loss * loss_coeffs.lambda_align)
-            + (duration_loss * loss_coeffs.lambda_duration)
+            (duration_loss * loss_coeffs.lambda_duration)
             + (pitch_loss * loss_coeffs.lambda_pitch)
             + (energy_loss * loss_coeffs.lambda_energy)
         )
@@ -191,7 +185,6 @@ class OptiSpeechGenerator(nn.Module):
             "start_idx": start_idx,
             "segment_size": segment_size,
             "loss": loss,
-            "align_loss": align_loss.detach().cpu(),
             "duration_loss": duration_loss.detach().cpu(),
             "pitch_loss": pitch_loss.detach().cpu(),
             "energy_loss": energy_loss.detach().cpu(),
@@ -272,22 +265,19 @@ class OptiSpeechGenerator(nn.Module):
         attn = generate_path(w_ceil.squeeze(1), attn_mask.squeeze(1)).unsqueeze(1)
 
         # Align encoded text
-        y = torch.matmul(attn.squeeze(1).transpose(1, 2), x.transpose(1, 2))
-        y = y.transpose(1, 2)
+        y = torch.matmul(attn.squeeze(1).float().transpose(1, 2), x)
+        # y = y.transpose(1, 2)
 
         # Decoder
+        target_padding_mask = ~y_mask.squeeze(1).bool().to(x.device)
         y = self.decoder(y, target_padding_mask)
         am_infer = (perf_counter() - am_t0) * 1000
 
         v_t0 = perf_counter()
         # Generate wav
-        f0_cond, _ = expand_by_duration(
-            pitch.unsqueeze(-1),
-            durations
-        )
         wav = self.vocoder(
             y.transpose(1, 2),
-            f0=f0_cond.transpose(1, -1),
+            f0=None,
             padding_mask=target_padding_mask
         )
         wav_lengths = y_lengths * self.hop_length
@@ -334,3 +324,7 @@ def generate_path(duration, mask):
     path = path - torch.nn.functional.pad(path, convert_pad_shape([[0, 0], [1, 0], [0, 0]]))[:, :-1]
     path = path * mask
     return path
+def convert_pad_shape(pad_shape):
+    inverted_shape = pad_shape[::-1]
+    pad_shape = [item for sublist in inverted_shape for item in sublist]
+    return pad_shape

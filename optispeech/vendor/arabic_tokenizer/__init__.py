@@ -26,4 +26,4 @@ class ArabicTokenizer(BaseTokenizer):
             warnings.warn("Arabic tokenizer does not support sentence splitting for now.")
         toks = arabic_to_tokens(text)
         ids = tokens_to_ids(toks)
-        return ids, text
+        return [ids], text

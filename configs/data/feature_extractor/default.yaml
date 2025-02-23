@@ -1,11 +1,11 @@
 _target_: optispeech.dataset.feature_extractors.CommonFeatureExtractor
 sample_rate: 24000
-n_feats: 100
-n_fft: 1024
-hop_length: 256
-win_length: 1024
-f_min: 80
-f_max: 8000
+n_feats: 256
+n_fft: 2048
+hop_length: 320
+win_length: 2048
+f_min: 0
+f_max: 12000
 center: true
 pitch_extractor:
   # Recommended extractor is:  EnsemblePitchExtractor
