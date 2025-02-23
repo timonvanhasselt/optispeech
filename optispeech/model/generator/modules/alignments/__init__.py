@@ -1,0 +1,131 @@
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from numba import jit
+
+# Reexport
+from .S_monotonic_align_Triton import maximum_path
+
+@jit(nopython=True)
+def _monotonic_alignment_search(log_p_attn):
+    # https://arxiv.org/abs/2005.11129
+    T_mel = log_p_attn.shape[0]
+    T_inp = log_p_attn.shape[1]
+    Q = np.full((T_inp, T_mel), fill_value=-np.inf)
+
+    log_prob = log_p_attn.transpose(1, 0)  # -> (T_inp,T_mel)
+    # 1.  Q <- init first row for all j
+    for j in range(T_mel):
+        Q[0, j] = log_prob[0, : j + 1].sum()
+
+    # 2.
+    for j in range(1, T_mel):
+        for i in range(1, min(j + 1, T_inp)):
+            Q[i, j] = max(Q[i - 1, j - 1], Q[i, j - 1]) + log_prob[i, j]
+
+    # 3.
+    A = np.full((T_mel,), fill_value=T_inp - 1)
+    for j in range(T_mel - 2, -1, -1):  # T_mel-2, ..., 0
+        # 'i' in {A[j+1]-1, A[j+1]}
+        i_a = A[j + 1] - 1
+        i_b = A[j + 1]
+        if i_b == 0:
+            argmax_i = 0
+        elif Q[i_a, j] >= Q[i_b, j]:
+            argmax_i = i_a
+        else:
+            argmax_i = i_b
+        A[j] = argmax_i
+    return A
+
+
+def viterbi_decode(log_p_attn, text_lengths, feats_lengths):
+    """Extract duration from an attention probability matrix
+
+    Args:
+        log_p_attn (Tensor): Batched log probability of attention
+            matrix (B, T_feats, T_text).
+        text_lengths (Tensor): Text length tensor (B,).
+        feats_legnths (Tensor): Feature length tensor (B,).
+
+    Returns:
+        Tensor: Batched token duration extracted from `log_p_attn` (B, T_text).
+        Tensor: Binarization loss tensor ().
+
+    """
+    B = log_p_attn.size(0)
+    T_text = log_p_attn.size(2)
+    device = log_p_attn.device
+
+    bin_loss = 0
+    ds = torch.zeros((B, T_text), device=device)
+    for b in range(B):
+        cur_log_p_attn = log_p_attn[b, : feats_lengths[b], : text_lengths[b]]
+        viterbi = _monotonic_alignment_search(cur_log_p_attn.detach().float().cpu().numpy())
+        _ds = np.bincount(viterbi)
+        ds[b, : len(_ds)] = torch.from_numpy(_ds).to(device)
+
+        t_idx = torch.arange(feats_lengths[b])
+        bin_loss = bin_loss - cur_log_p_attn[t_idx, viterbi].mean()
+    bin_loss = bin_loss / B
+    return ds, bin_loss
+
+
+@jit(nopython=True)
+def _average_by_duration(ds, xs, text_lengths, feats_lengths):
+    B = ds.shape[0]
+    xs_avg = np.zeros_like(ds)
+    ds = ds.astype(np.int32)
+    for b in range(B):
+        t_text = text_lengths[b]
+        t_feats = feats_lengths[b]
+        d = ds[b, :t_text]
+        d_cumsum = d.cumsum()
+        d_cumsum = [0] + list(d_cumsum)
+        x = xs[b, :t_feats]
+        for n, (start, end) in enumerate(zip(d_cumsum[:-1], d_cumsum[1:])):
+            if len(x[start:end]) != 0:
+                xs_avg[b, n] = x[start:end].mean()
+            else:
+                xs_avg[b, n] = 0
+    return xs_avg
+
+
+def average_by_duration(ds, xs, text_lengths, feats_lengths):
+    """Average frame-level features into token-level according to durations
+
+    Args:
+        ds (Tensor): Batched token duration (B, T_text).
+        xs (Tensor): Batched feature sequences to be averaged (B, T_feats).
+        text_lengths (Tensor): Text length tensor (B,).
+        feats_lengths (Tensor): Feature length tensor (B,).
+
+    Returns:
+        Tensor: Batched feature averaged according to the token duration (B, T_text).
+
+    """
+    device = ds.device
+    args = [ds, xs, text_lengths, feats_lengths]
+    args = [arg.detach().float().cpu().numpy() for arg in args]
+    xs_avg = _average_by_duration(*args)
+    xs_avg = torch.from_numpy(xs_avg).to(device)
+    return xs_avg
+
+
+def expand_by_duration(x, durations):
+    dtype = x.dtype
+    lengths = durations.sum(dim=1)
+    max_len = lengths.max()
+    dur_cumsum = torch.cumsum(F.pad(durations, (1, 0, 0, 0), value=0.0), dim=1)
+    dur_cumsum = dur_cumsum[:, None, :]
+    dur_cumsum = dur_cumsum.to(dtype)
+    range_ = torch.arange(max_len, device=x.device)[None, :, None]
+    mult = (
+        (dur_cumsum[:, :, :-1] <= range_)
+        &(dur_cumsum[:, :, 1:] > range_)
+    )
+    mult = mult.to(dtype)
+    expanded = torch.matmul(mult, x)
+    return expanded, lengths
+

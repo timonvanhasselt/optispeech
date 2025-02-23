@@ -7,14 +7,8 @@ from torch.nn import functional as F
 from optispeech.utils import denormalize, sequence_mask
 from optispeech.utils.segments import get_segments, get_random_segments
 
-from .alignments import (
-    AlignmentModule,
-    GaussianUpsampling,
-    average_by_duration,
-    expand_by_duration,
-    viterbi_decode,
-)
-from .loss import FastSpeech2Loss, ForwardSumLoss
+from .modules.alignments import average_by_duration, maximum_path
+from .loss import duration_loss, FastSpeech2Loss, ForwardSumLoss
 
 
 class OptiSpeechGenerator(nn.Module):
@@ -51,10 +45,8 @@ class OptiSpeechGenerator(nn.Module):
         self.text_embedding = text_embedding(dim=dim)
         self.encoder = encoder(dim=dim)
         self.duration_predictor = duration_predictor(dim=dim)
-        self.alignment_module = AlignmentModule(adim=dim, odim=self.n_feats)
         self.pitch_predictor = pitch_predictor(dim=dim)
         self.energy_predictor = energy_predictor(dim=dim)
-        self.feature_upsampler = GaussianUpsampling()
         self.decoder = decoder(dim=dim)
         self.vocoder = vocoder(
             input_channels=dim,
@@ -87,7 +79,6 @@ class OptiSpeechGenerator(nn.Module):
 
         Returns:
             loss: (torch.Tensor): scaler representing total loss
-            alignment_loss: (torch.Tensor): scaler representing alignment loss
             duration_loss: (torch.Tensor): scaler representing durations loss
             pitch_loss: (torch.Tensor): scaler representing pitch loss
             energy_loss: (torch.Tensor): scaler representing energy loss
@@ -117,15 +108,30 @@ class OptiSpeechGenerator(nn.Module):
             x = x + lid_embs.unsqueeze(1)
 
         # alignment
-        log_p_attn = self.alignment_module(
-            text=x,
-            feats=mel.transpose(1, 2),
-            text_lengths=x_lengths,
-            feats_lengths=mel_lengths,
-            x_masks=input_padding_mask,
-        )
-        durations, bin_loss = viterbi_decode(log_p_attn, x_lengths, mel_lengths)
         duration_hat = self.duration_predictor(x.detach(), input_padding_mask)
+        attn_mask = x_mask.unsqueeze(-1) * mel_mask.unsqueeze(2)
+        with torch.no_grad():
+            # negative cross-entropy
+            s_p_sq_r = torch.ones_like(x) # [b, d, t]
+            # s_p_sq_r = torch.exp(-2 * logx) 
+            neg_cent1 = torch.sum(
+                -0.5 * math.log(2 * math.pi)- torch.zeros_like(x), [1], keepdim=True
+            )
+            # neg_cent1 = torch.sum(
+            #     -0.5 * math.log(2 * math.pi) - logx, [1], keepdim=True
+            #     ) # [b, 1, t_s]
+            neg_cent2 = torch.einsum("bdt, bds -> bts", -0.5 * (y**2), s_p_sq_r)
+            neg_cent3 = torch.einsum("bdt, bds -> bts", y, (x * s_p_sq_r))
+            neg_cent4 = torch.sum(
+                -0.5 * (x**2) * s_p_sq_r, [1], keepdim=True
+            )  
+            neg_cent = neg_cent1 + neg_cent2 + neg_cent3 + neg_cent4
+            attn_mask = torch.unsqueeze(x_mask, 2) * torch.unsqueeze(mel_mask, -1)
+            attn = (
+                maximum_path(neg_cent, attn_mask.squeeze(1)).unsqueeze(1).detach()
+            )
+        durations = torch.log(1e-8 + attn.sum(2)) * x_mask
+        dur_loss = duration_loss(duration_hat, durations, x_lengths, use_log=False)
 
         # Average pitch and energy values based on durations
         pitches = average_by_duration(durations, pitches.unsqueeze(-1), x_lengths, mel_lengths)
@@ -136,9 +142,9 @@ class OptiSpeechGenerator(nn.Module):
         x, energy_hat = self.energy_predictor(x, input_padding_mask, energies)
 
         # upsample to mel lengths
-        y = self.feature_upsampler(
-            hs=x, ds=durations, h_masks=mel_mask.squeeze(1).bool(), d_masks=x_mask.squeeze(1).bool()
-        )
+        attn = attn.squeeze(1).transpose(1,2)
+        y = torch.matmul(attn.squeeze(1).transpose(1, 2), x.transpose(1, 2))
+        y = y.transpose(1, 2)
 
         # Decoder
         y = self.decoder(y, target_padding_mask)
@@ -255,14 +261,19 @@ class OptiSpeechGenerator(nn.Module):
         else:
             energy = None
 
-        y_lengths = durations.sum(dim=1)
+        w = torch.exp(durations) * x_mask
+        w_ceil = torch.ceil(w) * d_factor
+        y_lengths = torch.clamp_min(torch.sum(w_ceil, [1, 2]), 1).long()
         y_max_length = y_lengths.max()
-        y_mask = torch.unsqueeze(sequence_mask(y_lengths, y_max_length), 1).type_as(x)
-        target_padding_mask = ~y_mask.squeeze(1).bool()
+        y_max_length_ = fix_len_compatibility(y_max_length)
+        # Using obtained durations `w` construct alignment map `attn`
+        y_mask = sequence_mask(y_lengths, y_max_length_).unsqueeze(1).to(x_mask.dtype)
+        attn_mask = x_mask.unsqueeze(-1) * y_mask.unsqueeze(2)
+        attn = generate_path(w_ceil.squeeze(1), attn_mask.squeeze(1)).unsqueeze(1)
 
-        y = self.feature_upsampler(
-            hs=x, ds=durations, h_masks=y_mask.squeeze(1).bool(), d_masks=x_mask.squeeze(1).bool()
-        )
+        # Align encoded text
+        y = torch.matmul(attn.squeeze(1).transpose(1, 2), x.transpose(1, 2))
+        y = y.transpose(1, 2)
 
         # Decoder
         y = self.decoder(y, target_padding_mask)
@@ -299,3 +310,27 @@ class OptiSpeechGenerator(nn.Module):
             "rtf": rtf,
             "latency": latency,
         }
+
+
+def fix_len_compatibility(length, num_downsamplings_in_unet=2):
+    factor = torch.scalar_tensor(2).pow(num_downsamplings_in_unet)
+    length = (length / factor).ceil() * factor
+    if not torch.onnx.is_in_onnx_export():
+        return length.int().item()
+    else:
+        return length
+
+
+def generate_path(duration, mask):
+    device = duration.device
+
+    b, t_x, t_y = mask.shape
+    cum_duration = torch.cumsum(duration, 1)
+    path = torch.zeros(b, t_x, t_y, dtype=mask.dtype).to(device=device)
+
+    cum_duration_flat = cum_duration.view(b * t_x)
+    path = sequence_mask(cum_duration_flat, t_y).to(mask.dtype)
+    path = path.view(b, t_x, t_y)
+    path = path - torch.nn.functional.pad(path, convert_pad_shape([[0, 0], [1, 0], [0, 0]]))[:, :-1]
+    path = path * mask
+    return path
