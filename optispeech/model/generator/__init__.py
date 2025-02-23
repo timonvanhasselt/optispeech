@@ -150,20 +150,20 @@ class OptiSpeechGenerator(nn.Module):
 
         # get random segments
         segment_size = min(self.segment_size, y.shape[-2])
-        num_frames = mel_lengths - 4 # mel-centered
+        num_frames = mel_lengths - 5
         segment, start_idx = get_random_segments(
             y.transpose(1, 2),
             num_frames.type_as(y),
             segment_size,
         )
-        f0_cond = get_segments(
-            f0_real.unsqueeze(1),
-            start_idxs=start_idx,
-            segment_size=segment_size
-        )
+        # f0_cond = get_segments(
+            # f0_real.unsqueeze(1),
+            # start_idxs=start_idx,
+            # segment_size=segment_size
+        # )
 
         # Generate wav
-        wav_hat = self.vocoder(segment.detach(), f0=f0_cond.detach())
+        wav_hat = self.vocoder(segment.detach(), f0=None)
 
         # Losses
         loss_coeffs = self.loss_coeffs
