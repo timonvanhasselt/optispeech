@@ -1,3 +1,19 @@
+# Simple inference example with ospeech 
+test_reader.py
+
+## Dependencies: 
+`pip install soundfile numpy onnxruntime piper-phonemize-fix`
+
+(piper-phonemize-fix for use with newer python version)
+
+## Download voice models first
+Emily: https://huggingface.co/mush42/optispeech/resolve/main/onnx/lightspeech/en-us/emily-step_400k.onnx
+
+Mike: https://huggingface.co/mush42/optispeech/resolve/main/onnx/lightspeech/en-us/mike-step_305k.onnx
+
+Below is the original read-me
+______________________________________________________________________________________________________________________________
+
 # ospeech
 
 Minimum dependency inference library for [OptiSpeech TTS model](https://github.com/mush42/optispeech).
