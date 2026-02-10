@@ -81,14 +81,19 @@ class IPATokenizer(BaseTokenizer):
 
     def phonemize_text(self, text: str, language: str) -> str:
         try:
-            from piper_phonemize import phonemize_espeak
+            # Probeer eerst de fix versie
+            from piper_phonemize_fix import phonemize_espeak
         except ImportError:
-            raise ImportError(
-                "piper-phonemize package is needed for the IPA tokenizer.\n"
-                "pip install piper-phonemize\n"
-                "or build it yourself from the following repository:\n"
-                "https://github.com/rhasspy/piper-phonemize"
-            )
+            try:
+                # Val terug op de standaard versie
+                from piper_phonemize import phonemize_espeak
+            except ImportError:
+                raise ImportError(
+                    "piper-phonemize package is needed for the IPA tokenizer.\n"
+                    "pip install piper-phonemize\n"
+                    "or build it yourself from the following repository:\n"
+                    "https://github.com/rhasspy/piper-phonemize"
+                )
 
         # Preprocess
         text = self.preprocess_text(text, language)
