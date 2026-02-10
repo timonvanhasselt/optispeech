@@ -1,23 +1,17 @@
-from typing import Any
-
 from .normalization import UNICODE_NORM_FORM
 from .tokenizers import BaseTokenizer
 
 
 class TextProcessor:
     def __init__(
-        self, tokenizer: str|Any, add_blank: str, add_bos_eos: str, normalize_text: bool, languages: list[str]
+        self, tokenizer_name: str, add_blank: str, add_bos_eos: str, normalize_text: bool, languages: list[str], **kwargs
     ):
-        self.tokenizer_ref = tokenizer
+        self.tokenizer_name = tokenizer_name
         self.add_blank = add_blank
         self.add_bos_eos = add_bos_eos
         self.normalize_text = normalize_text
         self.languages = languages
-        if isinstance(self.tokenizer_ref, str):
-            tokenizer_cls = BaseTokenizer.get_tokenizer_by_name(self.tokenizer_ref)
-        else:
-            # The user passed a class which is partially initialized by hydra
-            tokenizer_cls = self.tokenizer_ref
+        tokenizer_cls = BaseTokenizer.get_tokenizer_by_name(tokenizer_name)
         self.tokenizer = tokenizer_cls(add_blank=add_blank, add_bos_eos=add_bos_eos, normalize_text=normalize_text)
         self.num_languages = len(languages)
         self.is_multi_language = self.num_languages > 1
@@ -34,11 +28,15 @@ class TextProcessor:
 
     @classmethod
     def from_dict(cls, kwargs):
+        # HACK: Oude modellen gebruiken 'tokenizer', nieuwe 'tokenizer_name'
+        if "tokenizer" in kwargs and "tokenizer_name" not in kwargs:
+            kwargs["tokenizer_name"] = kwargs.pop("tokenizer")
+            
         return cls(**kwargs)
 
     def asdict(self):
         return dict(
-            tokenizer=self.tokenizer.name,
+            tokenizer_name=self.tokenizer_name,
             add_blank=self.add_blank,
             add_bos_eos=self.add_bos_eos,
             normalize_text=self.normalize_text,
