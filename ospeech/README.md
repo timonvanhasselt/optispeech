@@ -2,9 +2,9 @@
 test_reader.py
 
 ## Dependencies: 
-`pip install soundfile numpy onnxruntime piper-phonemize-fix`
+`pip install soundfile numpy onnxruntime piper-phonemize-fix` and `pip installt git+https://github.com/timonvanhasselt/optispeech.git` 
 
-(piper-phonemize-fix for use with newer python version)
+(piper-phonemize-fix for use with newer python version and some small changes for that in ospeech via optispeech.git)
 
 ## Download voice models first
 Emily: https://huggingface.co/mush42/optispeech/resolve/main/onnx/lightspeech/en-us/emily-step_400k.onnx
