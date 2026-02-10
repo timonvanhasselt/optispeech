@@ -81,11 +81,11 @@ class IPATokenizer(BaseTokenizer):
 
     def phonemize_text(self, text: str, language: str) -> str:
         try:
-            # Probeer eerst de fix versie
+            # Try the piper_phonemize_fix version #pip install piper-phonemize-fix for support of newer Python versions
             from piper_phonemize_fix import phonemize_espeak
         except ImportError:
             try:
-                # Val terug op de standaard versie
+                # Fallback to standard version
                 from piper_phonemize import phonemize_espeak
             except ImportError:
                 raise ImportError(
